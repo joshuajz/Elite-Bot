@@ -1,0 +1,194 @@
+from bs4 import BeautifulSoup
+import pandas as pd
+import requests
+import discord
+from dotenv import dotenv_values
+from embed import create_embed, add_field
+from discord.ext import tasks
+from datetime import datetime
+
+DEBUGGING = False
+CONFIG = dotenv_values(".env")
+INTENTS = discord.Intents.default()
+PRICE = 400000
+URL = "https://eddb.io/commodity/276"
+BASE_URL = "https://eddb.io"
+RECENT_CALLS = []
+
+
+def determine_black_market(station):
+    """Determins if a station has a black market"""
+    link = f"{BASE_URL}{station}"
+    data = requests.get(link).text
+    soup = BeautifulSoup(data, "html.parser")
+    return soup.find("span", string="Blackmarket")["class"][0] == "yesNo-yes"
+
+
+def pull_data():
+    """Pulls all of the station data for diamonds"""
+    data = requests.get(URL).text
+    soup = BeautifulSoup(data, "html.parser")
+
+    table = soup.find_all("table")[0]
+    dataframe = pd.DataFrame(
+        columns=[
+            "Station",
+            "System",
+            "Sell",
+            "Compare",
+            "Demand",
+            "Pad",
+            "Time",
+            "Link",
+        ]
+    )
+
+    count = 0
+
+    for row in table.tbody.find_all("tr"):
+        count += 1
+        columns = row.find_all("td")
+
+        station = columns[0].text.strip()
+        link = columns[0].find("a").get("href")
+        system = columns[1].text.strip()
+        sell = int(columns[2].text.strip().replace(",", ""))
+        compare = columns[3].text.strip()
+        demand = columns[4].text.strip()
+        pad = columns[5].text.strip()
+        time = columns[6].text.strip()
+
+        f = pd.DataFrame(
+            [
+                {
+                    "Station": station,
+                    "System": system,
+                    "Sell": sell,
+                    "Compare": compare,
+                    "Demand": demand,
+                    "Pad": pad,
+                    "Time": time,
+                    "Link": link,
+                }
+            ]
+        )
+        dataframe = pd.concat([dataframe, f])
+
+    items = dataframe.loc[dataframe["Sell"] >= PRICE]
+    embeds = []
+    if len(items) >= 1:
+        for item in items.values:
+            embed = create_embed(f"{item[0]}", f"*System:* {item[1]}", "orange")
+            add_field(embed, "Price", item[2], True)
+            add_field(embed, "Compare", item[3], True)
+            add_field(embed, "Demand", item[4], True)
+            add_field(embed, "Pad", item[5], True)
+            add_field(embed, "Time", item[6], True)
+            add_field(embed, "Link", f"{BASE_URL}{item[7]}", True)
+            add_field(
+                embed, "Blackmarket", f"**{determine_black_market(item[7])}**", False
+            )
+
+            embeds.append(
+                [
+                    embed,
+                    Station(
+                        station,
+                        system,
+                        sell,
+                        compare,
+                        demand,
+                        pad,
+                        time,
+                        link,
+                        datetime.now(),
+                    ),
+                ]
+            )
+
+    return embeds
+
+
+def check(station):
+    """Checks if an embed meets the conditions to be sent"""
+    print("Called Check", RECENT_CALLS, len(RECENT_CALLS))
+
+    def find_station(station2):
+        """Determins if two Station classes have the same station"""
+        if station2.station == station[1].station:
+            return True
+
+    found_station = list(filter(find_station, RECENT_CALLS))
+    if len(found_station) >= 1:
+        found_station = found_station[0]
+    else:
+        return True
+
+    time_difference = abs(
+        station[1].get_time() - found_station.get_time()
+    ).total_seconds()
+
+    if time_difference >= 3600:
+        RECENT_CALLS.remove(found_station)
+        return True
+
+    if abs(station[1].get_price() - found_station.get_price()) >= 90000:
+        RECENT_CALLS.remove(found_station)
+        return True
+
+
+# Discord Bot
+class MyClient(discord.Client):
+    async def on_ready(self):
+        """When the bot boots up"""
+        print("Bot is Ready")
+        await self.send_notifications.start()
+
+    async def on_message(self, message):
+        """On every message"""
+        if DEBUGGING:
+            print(f"DEBUGGING| {message.author}: {message.content}")
+
+    @tasks.loop(minutes=5)
+    async def send_notifications(self):
+        guild = client.guilds[0]
+        channel = guild.get_channel(int(CONFIG["CHANNEL_ID"]))
+        embeds = pull_data()
+        for embed in embeds:
+            # print("Checking Embeds")
+            if check(embed):
+                RECENT_CALLS.append(embed[1])
+                await channel.send("<@&1001604015550890104>", embed=embed[0])
+
+
+class Station:
+    def __init__(
+        self, station, system, sell, compare, demand, pad, time, link, message_time
+    ):
+        """Initalize"""
+        self.station = station
+        self.system = system
+        self.sell = sell
+        self.compare = compare
+        self.demand = demand
+        self.pad = pad
+        self.time = time
+        self.link = link
+        self.message_time = message_time
+
+    def get_price(self):
+        """Get Price"""
+        return self.sell
+
+    def get_time(self):
+        """Get Time"""
+        return self.message_time
+
+    def __str__(self):
+        """String"""
+        return f"Station: {self.station} | System: {self.system}\nSell: {self.sell} | Compare: {self.compare}\nDemand: {self.demand} | Pad: {self.pad}\nTime: {self.time} | link: {self.link}\nMessage Time: {self.message_time}"
+
+
+# Runs the discord bot
+client = MyClient(intents=INTENTS)
+client.run(CONFIG["TOKEN"])
